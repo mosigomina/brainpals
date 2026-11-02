@@ -1,6 +1,7 @@
 """
-Retail Sales & Demand Analytics - end-to-end pipeline (run_all.py)
-Reproduces 01_cleaning.ipynb, 02_eda.ipynb and 03_models.ipynb in order.
+Brainpals retail sales analytics: end-to-end pipeline (run_all.py)
+Reproduces 01_cleaning.ipynb, 02_eda.ipynb and 03_models.ipynb from the raw Excel file.
+Needs Brainpals_sales_analytics.xlsx in the same folder. Writes cleaned_master.csv and figures/.
 """
 
 import math
@@ -8,9 +9,8 @@ import os
 import warnings
 
 import matplotlib
-matplotlib.use('Agg')  # headless backend so figures save without opening windows
+matplotlib.use('Agg')   # save figures without opening windows
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import seaborn as sns
 import statsmodels.api as sm
@@ -24,7 +24,7 @@ warnings.filterwarnings('ignore')
 
 
 # =========================================================================
-# PHASE 1 & 2: DATA CLEANING AND FEATURE ENGINEERING (01_cleaning)
+# PHASES 1 AND 2: CLEANING AND FEATURE ENGINEERING
 # =========================================================================
 
 # -------------------------------------------------------------------------
@@ -348,1425 +348,520 @@ print(f"Final shape: {master_df.shape[0]:,} rows and {master_df.shape[1]} column
 
 
 # =========================================================================
-# PHASE 3: EXPLORATORY DATA ANALYSIS (02_eda)
+# PHASE 3: EXPLORATORY DATA ANALYSIS
 # =========================================================================
 
-# 1. Apply clean Seaborn styling across all figures
 sns.set_theme(style='whitegrid')
-
-# 2. Ensure destination folder exists
 os.makedirs('figures', exist_ok=True)
 
-# 3. Load the cleaned master dataset
 df = pd.read_csv('cleaned_master.csv')
 df['week_start'] = pd.to_datetime(df['week_start'])
 
-print(f"Loaded master dataset: {df.shape[0]:,} rows and {df.shape[1]} columns.")
+print(f"Loaded {df.shape[0]:,} rows and {df.shape[1]} columns.")
 
-# -------------------------------------------------------------------------
-# Figure 1: Chain-Level Weekly Revenue & Additive Decomposition
-# -------------------------------------------------------------------------
+weekly = df.groupby('week_start')['revenue_ngn'].sum().reset_index()
+weekly['revenue_m'] = weekly['revenue_ngn'] / 1e6
+weekly['rolling_12'] = weekly['revenue_m'].rolling(12, min_periods=1).mean()
 
-# 1. Aggregate revenue at chain level per week (scaled to Millions of NGN)
-weekly_rev = df.groupby('week_start')['revenue_ngn'].sum().reset_index()
-weekly_rev['revenue_m_ngn'] = weekly_rev['revenue_ngn'] / 1e6
-weekly_rev['rolling_12'] = weekly_rev['revenue_m_ngn'].rolling(window=12, min_periods=1).mean()
+parts = seasonal_decompose(weekly.set_index('week_start')['revenue_m'], model='additive', period=52)
+weekly['trend'] = parts.trend.values
+weekly['seasonal'] = parts.seasonal.values
+weekly['residual'] = parts.resid.values
 
-# 2. Decompose weekly revenue into trend, seasonality (52 weeks), and residual
-decomp = seasonal_decompose(weekly_rev.set_index('week_start')['revenue_m_ngn'], model='additive', period=52)
-
-# Build a tidy DataFrame for Seaborn
-decomp_df = pd.DataFrame({
-    'week_start': weekly_rev['week_start'],
-    'Actual Revenue': weekly_rev['revenue_m_ngn'],
-    '12-Week Rolling Mean': weekly_rev['rolling_12'],
-    'Trend': decomp.trend.values,
-    'Seasonality': decomp.seasonal.values,
-    'Residual': decomp.resid.values
-})
-
-# 3. Plot 4 stacked subplots using Seaborn
 fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
 
-# Panel 1: Observed Weekly Revenue and 12-Week Moving Average
-sns.lineplot(data=weekly_rev, x='week_start', y='revenue_m_ngn', ax=axes[0], label='Actual Weekly Revenue', color='#1f77b4', lw=1.5)
-sns.lineplot(data=weekly_rev, x='week_start', y='rolling_12', ax=axes[0], label='12-Week Rolling Mean', color='#ff7f0e', lw=2, linestyle='--')
-axes[0].set_ylabel('Revenue (M NGN)')
-axes[0].set_title('Figure 1: Chain-Level Weekly Revenue & Additive Decomposition', fontsize=13, fontweight='bold')
-axes[0].legend(loc='upper left')
+sns.lineplot(data=weekly, x='week_start', y='revenue_m', label='Weekly revenue', ax=axes[0])
+sns.lineplot(data=weekly, x='week_start', y='rolling_12', label='12-week rolling mean', ax=axes[0])
+axes[0].set(title='Figure 1: Chain-Wide Weekly Revenue and Decomposition', ylabel='Revenue (million NGN)')
 
-# Panel 2: Trend Component
-sns.lineplot(data=decomp_df, x='week_start', y='Trend', ax=axes[1], color='#2ca02c', lw=2)
-axes[1].set_ylabel('Trend (M NGN)')
+sns.lineplot(data=weekly, x='week_start', y='trend', ax=axes[1], color='green')
+axes[1].set(ylabel='Trend (million NGN)')
 
-# Panel 3: Seasonal Component
-sns.lineplot(data=decomp_df, x='week_start', y='Seasonality', ax=axes[2], color='#9467bd', lw=1.5)
-axes[2].set_ylabel('Seasonality (M NGN)')
+sns.lineplot(data=weekly, x='week_start', y='seasonal', ax=axes[2], color='purple')
+axes[2].set(ylabel='Seasonality (million NGN)')
 
-# Panel 4: Residual Component
-sns.scatterplot(data=decomp_df, x='week_start', y='Residual', ax=axes[3], color='#d62728', s=25)
-axes[3].axhline(0, color='black', linestyle='--', linewidth=1)
-axes[3].set_ylabel('Residual (M NGN)')
-axes[3].set_xlabel('Week Start Date')
+sns.scatterplot(data=weekly, x='week_start', y='residual', ax=axes[3], color='red')
+axes[3].axhline(0, color='black', linestyle='--')
+axes[3].set(ylabel='Residual (million NGN)', xlabel='Week starting (date)')
 
 plt.tight_layout()
-
-# 4. Save directly as 300 DPI PNG
 plt.savefig('figures/fig1_revenue_ts.png', dpi=300)
-print("Figure 1 saved to figures/fig1_revenue_ts.png (300 DPI)")
 
-# -------------------------------------------------------------------------
-# Figure 2: Correlation Heatmap (Numeric Store & Macro Variables)
-# -------------------------------------------------------------------------
-
-# 1. Define the store-level and external macro variables
-store_macro_vars = [
-    'size_sqm', 'staff_count', 'foot_traffic_index', 'competitors_2km', 
-    'manager_tenure_yrs', 'avg_temp_c', 'rainfall_mm', 'cpi_index', 
-    'fuel_price_ngn_per_l', 'holiday_week'
+store_external_vars = [
+    'size_sqm', 'staff_count', 'foot_traffic_index', 'competitors_2km', 'manager_tenure_yrs',
+    'avg_temp_c', 'rainfall_mm', 'cpi_index', 'fuel_price_ngn_per_l', 'holiday_week'
 ]
 
-# 2. Compute Pearson correlation matrix
-corr_matrix = df[store_macro_vars].corr()
-
-# 3. Create the heatmap using Seaborn
 plt.figure(figsize=(10, 8))
-sns.heatmap(
-    corr_matrix, 
-    annot=True, 
-    fmt='.2f', 
-    cmap='coolwarm', 
-    vmin=-1, 
-    vmax=1, 
-    center=0,
-    linewidths=0.5, 
-    cbar_kws={'label': 'Pearson Correlation Coefficient'}
-)
-
-plt.title('Figure 2: Correlation Heatmap of Store & Macroeconomic Variables', fontsize=12, pad=12)
+sns.heatmap(df[store_external_vars].corr(), annot=True, fmt='.2f', cmap='coolwarm',
+            vmin=-1, vmax=1, center=0, cbar_kws={'label': 'Pearson correlation'})
+plt.title('Figure 2: Correlation of Store and External Variables')
 plt.tight_layout()
-
-# 4. Save at 300 DPI
 plt.savefig('figures/fig2_correlation_heatmap.png', dpi=300)
-print("Figure 2 saved to figures/fig2_correlation_heatmap.png")
 
-# -------------------------------------------------------------------------
-# Figure 3: Promo vs Non-Promo Units Sold by Category (Faceted)
-# -------------------------------------------------------------------------
+df['promo_label'] = df['promo_flag'].map({0: 'No promo', 1: 'Promo'})
 
-# 1. Create readable labels for promotional status
-df['promo_label'] = df['promo_flag'].map({0: 'Non-Promo', 1: 'Promo'})
-
-# 2. Build faceted boxplot across all 7 product categories
-g = sns.catplot(
-    data=df,
-    x='promo_label',
-    y='units_sold',
-    hue='promo_label',       # Explicitly maps color palette to the x variable
-    col='category',
-    col_wrap=4,
-    kind='box',
-    showfliers=False,        # Suppresses outlier dots for clean interquartile comparison
-    palette=['#4c72b0', '#dd8452'],
-    legend=False,            # Suppresses redundant legend
-    height=3.5,
-    aspect=0.9,
-    sharey=True
-)
-
-# 3. Apply titles and labels
-g.set_axis_labels('', 'Weekly Units Sold')
-g.set_titles(col_template='{col_name}', weight='bold')
-g.fig.suptitle('Figure 3: Weekly Units Sold by Product Category (Promo vs Non-Promo)', fontsize=13, fontweight='bold', y=1.03)
-
-# 4. Save figure directly at 300 DPI
+g = sns.catplot(data=df, x='promo_label', y='units_sold', hue='promo_label', col='category',
+                col_wrap=4, kind='box', showfliers=False, height=3.5, aspect=0.9, legend=False)
+g.set_axis_labels('Promotion status', 'Units sold per store-week')
+g.set_titles('{col_name}')
+g.figure.suptitle('Figure 3: Weekly Units Sold by Category, Promo vs Non-Promo', y=1.03)
 g.savefig('figures/fig3_promo_by_category.png', dpi=300, bbox_inches='tight')
-print("Figure 3 saved cleanly to figures/fig3_promo_by_category.png")
 
-# -------------------------------------------------------------------------
-# Figure 4: Store Productivity Ranking (Revenue / Sqm vs. Revenue / Staff)
-# -------------------------------------------------------------------------
+stores = df.groupby(['store_id', 'store_type', 'size_sqm', 'staff_count'])['revenue_ngn'].sum().reset_index()
+stores['revenue_per_sqm'] = stores['revenue_ngn'] / stores['size_sqm']
+stores['revenue_per_staff_m'] = stores['revenue_ngn'] / stores['staff_count'] / 1e6
+stores = stores.sort_values('revenue_per_sqm', ascending=False)
 
-# 1. Aggregate total revenue per store and calculate efficiency metrics
-store_perf = df.groupby(['store_id', 'store_type', 'size_sqm', 'staff_count'])['revenue_ngn'].sum().reset_index()
-store_perf['rev_per_sqm'] = store_perf['revenue_ngn'] / store_perf['size_sqm']
-store_perf['rev_per_staff_m'] = (store_perf['revenue_ngn'] / store_perf['staff_count']) / 1e6
-
-# 2. Sort descending by revenue per square metre
-store_perf = store_perf.sort_values('rev_per_sqm', ascending=False).reset_index(drop=True)
-
-# 3. Create side-by-side comparative horizontal barplots
 fig, axes = plt.subplots(1, 2, figsize=(14, 9), sharey=True)
 
-# Left Panel: Store Ranking by Revenue per Sqm
-sns.barplot(
-    data=store_perf,
-    y='store_id',
-    x='rev_per_sqm',
-    hue='store_type',
-    dodge=False,
-    ax=axes[0],
-    palette='viridis'
-)
-axes[0].set_title('Stores Ranked by Revenue per Sqm (NGN)', fontsize=11, fontweight='bold')
-axes[0].set_xlabel('Total Revenue / Size Sqm (NGN)')
-axes[0].set_ylabel('Store ID')
-axes[0].xaxis.set_major_formatter('{x:,.0f}')
-axes[0].legend(title='Store Type', loc='lower right')
+sns.barplot(data=stores, y='store_id', x='revenue_per_sqm', hue='store_type', dodge=False, ax=axes[0])
+axes[0].set(title='Revenue per sqm', xlabel='Two-year revenue per sqm (NGN)', ylabel='Store')
 
-# Right Panel: Revenue per Staff Member (same store order)
-sns.barplot(
-    data=store_perf,
-    y='store_id',
-    x='rev_per_staff_m',
-    hue='store_type',
-    dodge=False,
-    ax=axes[1],
-    palette='viridis'
-)
-axes[1].set_title('Revenue per Staff Member (Million NGN)', fontsize=11, fontweight='bold')
-axes[1].set_xlabel('Total Revenue / Staff Count (M NGN)')
-axes[1].set_ylabel('')
-axes[1].legend().remove()
+sns.barplot(data=stores, y='store_id', x='revenue_per_staff_m', hue='store_type', dodge=False, ax=axes[1])
+axes[1].set(title='Revenue per staff member', xlabel='Two-year revenue per staff member (million NGN)', ylabel='')
+axes[1].get_legend().remove()
 
-plt.suptitle('Figure 4: Store Productivity Ranking (Revenue per Sqm vs. Revenue per Staff)', fontsize=13, fontweight='bold', y=0.98)
+plt.suptitle('Figure 4: Store Productivity Ranking (ordered by revenue per sqm)')
 plt.tight_layout()
+plt.savefig('figures/fig4_store_productivity.png', dpi=300)
 
-# 4. Save directly as 300 DPI PNG
-plt.savefig('figures/fig4_store_productivity.png', dpi=300, bbox_inches='tight')
-print("Figure 4 saved to figures/fig4_store_productivity.png")
+print('Rank correlation between the two measures:',
+      round(stores['revenue_per_sqm'].corr(stores['revenue_per_staff_m'], method='spearman'), 2))
 
-# -------------------------------------------------------------------------
-# Figure 5: Log-Log Demand Curves by Product Category (Faceted)
-# -------------------------------------------------------------------------
-
-# 1. Build faceted scatter plot with linear regression fit per category
-g = sns.lmplot(
-    data=df,
-    x='log_price_ratio',
-    y='log_units',
-    col='category',
-    col_wrap=4,
-    height=3.2,
-    aspect=1.0,
-    scatter_kws={'alpha': 0.15, 's': 10, 'color': '#1f77b4'},
-    line_kws={'color': '#d62728', 'linewidth': 1.8}
-)
-
-# 2. Add clear academic axis titles
-g.set_axis_labels('Log Price Ratio: log(P / P_list)', 'Log Units Sold: log(Q)')
-g.set_titles(col_template='{col_name}', weight='bold')
-g.fig.suptitle('Figure 5: Log-Log Demand Curves by Product Category', fontsize=13, fontweight='bold', y=1.03)
-
-# 3. Save figure at 300 DPI
+g = sns.lmplot(data=df, x='log_price_ratio', y='log_units', col='category', col_wrap=4,
+               height=3.2, scatter_kws={'alpha': 0.1, 's': 8}, line_kws={'color': 'red'})
+g.set_axis_labels('log price ratio (log of real price / list price)', 'log units sold')
+g.set_titles('{col_name}')
+g.figure.suptitle('Figure 5: Log Units vs Log Price Ratio by Category', y=1.03)
 g.savefig('figures/fig5_log_price_vs_log_units.png', dpi=300, bbox_inches='tight')
-print("Figure 5 saved to figures/fig5_log_price_vs_log_units.png")
 
-# -------------------------------------------------------------------------
-# Figure 6: Distribution of Weekly Units Sold by Store Type
-# -------------------------------------------------------------------------
+order = ['Express', 'Standard', 'Hypermarket']
 
-# 1. Create a 2-panel comparative layout
 fig, axes = plt.subplots(1, 2, figsize=(13, 5))
 
-# Order formats from smallest to largest
-store_order = ['Express', 'Standard', 'Hypermarket']
+sns.boxplot(data=df, x='store_type', y='units_sold', order=order, showfliers=False, ax=axes[0])
+axes[0].set(title='Boxplot (outliers hidden)', xlabel='Store type', ylabel='Units sold per store-week')
 
-# 2. Left Panel: Boxplot focusing on the interquartile range (IQR)
-sns.boxplot(
-    data=df, 
-    x='store_type', 
-    y='units_sold', 
-    order=store_order,
-    color='#6baed6',        # Single clean colour avoids palette/hue warnings
-    showfliers=False,       # Suppresses extreme fliers for clear quartile comparison
-    ax=axes[0]
-)
-axes[0].set_title('Core Interquartile Distribution (Fliers Hidden)', fontsize=11, fontweight='bold')
-axes[0].set_xlabel('Store Type')
-axes[0].set_ylabel('Weekly Units Sold')
-
-# 3. Right Panel: Violin plot with log-scale to reveal density shapes & tails
-sns.violinplot(
-    data=df, 
-    x='store_type', 
-    y='units_sold', 
-    order=store_order,
-    color='#6baed6',
-    cut=0,                  # Bounds density strictly within actual observed range
-    inner='quartile',       # Draws dashed lines for 25th, 50th (median), and 75th percentiles
-    ax=axes[1]
-)
+sns.violinplot(data=df, x='store_type', y='units_sold', order=order, cut=0, inner='quartile', ax=axes[1])
 axes[1].set_yscale('log')
-axes[1].set_title('Density & Upper Tails (Log Scale)', fontsize=11, fontweight='bold')
-axes[1].set_xlabel('Store Type')
-axes[1].set_ylabel('Weekly Units Sold (Log Scale)')
+axes[1].set(title='Violin plot (log scale)', xlabel='Store type', ylabel='Units sold per store-week (log scale)')
 
-plt.suptitle('Figure 6: Weekly Units Sold Distribution by Store Type', fontsize=13, fontweight='bold', y=1.02)
+plt.suptitle('Figure 6: Weekly Units Sold by Store Type')
 plt.tight_layout()
+plt.savefig('figures/fig6_units_by_store_type.png', dpi=300)
 
-# 4. Save figure at 300 DPI
-plt.savefig('figures/fig6_units_by_store_type.png', dpi=300, bbox_inches='tight')
-print("Figure 6 saved to figures/fig6_units_by_store_type.png")
-
-# -------------------------------------------------------------------------
-# Figure 7: Pearson vs. Spearman Correlation Matrix Comparison
-# -------------------------------------------------------------------------
-
-# 1. Select key analytical variables across sales, operations, and macro factors
-corr_cols = [
-    'units_sold', 'unit_price_ngn', 'discount_pct', 'promo_flag', 
-    'size_sqm', 'foot_traffic_index', 'competitors_2km',
-    'avg_temp_c', 'rainfall_mm', 'cpi_index', 'fuel_price_ngn_per_l'
+corr_vars = [
+    'units_sold', 'unit_price_ngn', 'discount_pct', 'promo_flag', 'size_sqm', 'foot_traffic_index',
+    'competitors_2km', 'avg_temp_c', 'rainfall_mm', 'cpi_index', 'fuel_price_ngn_per_l'
 ]
 
-# 2. Compute Pearson (linear) and Spearman (rank-order monotonic) correlations
-pearson_corr = df[corr_cols].corr(method='pearson')
-spearman_corr = df[corr_cols].corr(method='spearman')
+pearson = df[corr_vars].corr(method='pearson')
+spearman = df[corr_vars].corr(method='spearman')
 
-# 3. Create a side-by-side comparative heatmap
 fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-
-# Left: Pearson Linear Correlation
-sns.heatmap(
-    pearson_corr,
-    annot=True,
-    fmt='.2f',
-    cmap='coolwarm',
-    vmin=-1,
-    vmax=1,
-    center=0,
-    cbar=False,
-    ax=axes[0],
-    square=True
-)
-axes[0].set_title('Pearson Correlation (Linear)', fontsize=11, fontweight='bold')
-
-# Right: Spearman Monotonic Rank Correlation
-sns.heatmap(
-    spearman_corr,
-    annot=True,
-    fmt='.2f',
-    cmap='coolwarm',
-    vmin=-1,
-    vmax=1,
-    center=0,
-    cbar=True,
-    cbar_kws={'label': 'Correlation Coefficient'},
-    ax=axes[1],
-    square=True
-)
-axes[1].set_title('Spearman Correlation (Monotonic Rank)', fontsize=11, fontweight='bold')
-
-plt.suptitle('Figure 7: Pearson vs. Spearman Correlation Matrix Comparison', fontsize=13, fontweight='bold', y=0.98)
+sns.heatmap(pearson, annot=True, fmt='.2f', cmap='coolwarm', vmin=-1, vmax=1, center=0,
+            cbar=False, square=True, ax=axes[0])
+axes[0].set_title('Pearson (straight-line)')
+sns.heatmap(spearman, annot=True, fmt='.2f', cmap='coolwarm', vmin=-1, vmax=1, center=0,
+            square=True, cbar_kws={'label': 'Correlation'}, ax=axes[1])
+axes[1].set_title('Spearman (rank-based)')
+plt.suptitle('Figure 7: Pearson vs Spearman Correlation')
 plt.tight_layout()
+plt.savefig('figures/fig7_pearson_vs_spearman.png', dpi=300)
 
-# 4. Save figure directly at 300 DPI
-plt.savefig('figures/fig7_pearson_vs_spearman.png', dpi=300, bbox_inches='tight')
-# 5. Print top discrepancies using pure Pandas (no NumPy required)
-diff_corr = (pearson_corr - spearman_corr).abs().unstack()
+# Table of the pairs where the two methods disagree most
+table = pd.DataFrame({'pearson': pearson.unstack(), 'spearman': spearman.unstack()}).reset_index()
+table.columns = ['variable_1', 'variable_2', 'pearson', 'spearman']
+table['gap'] = (table['pearson'] - table['spearman']).abs()
+table = table[table['variable_1'] < table['variable_2']]
+print((table.sort_values('gap', ascending=False).head(8).round(2).reset_index(drop=True)).to_string())
 
-# Keep unique pairs only (exclude diagonals and mirrored pairs)
-unique_pairs = diff_corr[diff_corr.index.get_level_values(0) < diff_corr.index.get_level_values(1)]
-top_5 = unique_pairs.sort_values(ascending=False).head(5)
+customers = pd.read_excel('Brainpals_sales_analytics.xlsx', sheet_name='Customers')
+customers['spend_k_ngn'] = customers['total_spend_12m_ngn'] / 1e3
 
-print("\nTop 5 Discrepancies (|Pearson - Spearman|):")
-for (v1, v2), diff_val in top_5.items():
-    p_val = pearson_corr.loc[v1, v2]
-    s_val = spearman_corr.loc[v1, v2]
-    print(f"{v1} vs {v2}: Pearson = {p_val:.2f}, Spearman = {s_val:.2f} (Diff = {diff_val:.2f})")
-
-# -------------------------------------------------------------------------
-# Figure 8: Customer Total Spend vs. Visits Coloured by Loyalty Tier
-# -------------------------------------------------------------------------
-
-# 1. Load the Customers sheet
-excel_file = 'Brainpals_sales_analytics.xlsx'
-customers = pd.read_excel(excel_file, sheet_name='Customers')
-
-# Identify visit, spend, and tier column names dynamically
-spend_col = [c for c in customers.columns if 'spend' in c][0]
-visits_col = [c for c in customers.columns if 'visit' in c][0]
-tier_col = [c for c in customers.columns if 'tier' in c or 'loyalty' in c][0]
-
-# Standardise tier text formatting
-customers[tier_col] = customers[tier_col].astype(str).str.strip().str.title()
-
-# 2. Scale spend to thousands of NGN (k NGN)
-customers['total_spend_k_ngn'] = customers[spend_col] / 1e3
-
-# 3. Dynamically extract the actual unique tiers present in your data
-actual_tiers = sorted(customers[tier_col].unique().tolist())
-print(f"Detected Loyalty Tiers: {actual_tiers}")
-
-# 4. Create the scatter plot using Seaborn
-fig, ax = plt.subplots(figsize=(10, 6))
-
-sns.scatterplot(
-    data=customers,
-    x=visits_col,
-    y='total_spend_k_ngn',
-    hue=tier_col,
-    hue_order=actual_tiers,       # Matches the exact detected labels
-    palette='tab10',              # Distinct, high-contrast colours
-    alpha=0.75,
-    s=55,
-    edgecolor='w',                # Crisp white outline around each marker
-    linewidth=0.5,
-    ax=ax
-)
-
-# 5. Position legend cleanly
-sns.move_legend(ax, "upper left", title='Loyalty Tier', frameon=True)
-
-# 6. Add titles and axis labels
-plt.title('Figure 8: Customer Lifetime Spend vs. Total Visits by Loyalty Tier', fontsize=12, fontweight='bold', pad=12)
-plt.xlabel('Total Store Visits', fontsize=10)
-plt.ylabel('Total Spend (Thousand NGN)', fontsize=10)
+plt.figure(figsize=(10, 6))
+sns.scatterplot(data=customers, x='visits_12m', y='spend_k_ngn', hue='loyalty_tier',
+                hue_order=['Bronze', 'Silver', 'Gold'], palette='viridis', alpha=0.7)
+plt.title('Figure 8: Customer Spend vs Visits by Loyalty Tier')
+plt.xlabel('Store visits in last 12 months (count)')
+plt.ylabel('Total spend in last 12 months (thousand NGN)')
+plt.legend(title='Loyalty tier')
 plt.tight_layout()
-
-# 7. Save figure at 300 DPI
-plt.savefig('figures/fig8_customer_spend_vs_visits.png', dpi=300, bbox_inches='tight')
-print("Figure 8 saved cleanly to figures/fig8_customer_spend_vs_visits.png")
+plt.savefig('figures/fig8_customer_spend_vs_visits.png', dpi=300)
 
 
 
 # =========================================================================
-# PHASE 4 & 5: MODELLING AND BUSINESS QUESTIONS (03_models)
+# PHASES 4 AND 5: MODELS AND BUSINESS QUESTIONS
 # =========================================================================
 
-# Import needed libraries
+sns.set_theme(style='whitegrid')
+os.makedirs('figures', exist_ok=True)
 
-# Load the cleaned dataset
 df = pd.read_csv('cleaned_master.csv')
 df['week_start'] = pd.to_datetime(df['week_start'])
 
-print(f"Loaded cleaned_master.csv: {df.shape[0]:,} rows across {df['category'].nunique()} categories.")
-
-# -------------------------------------------------------------------------
-# Model A: Log-Log Price Elasticity by Product Category
-# -------------------------------------------------------------------------
-
-results = []
-
-# Estimate log-log regression per category
-for cat in df['category'].unique():
-    cat_data = df[df['category'] == cat]
-    
-    # Fit OLS model: log_units ~ log_price_ratio
-    model = smf.ols('log_units ~ log_price_ratio', data=cat_data).fit()
-    
-    # Extract coefficient, 95% CI, p-value, and R-squared
-    coef = model.params['log_price_ratio']
-    ci = model.conf_int().loc['log_price_ratio']
-    
-    results.append({
-        'Category': cat,
-        'Elasticity (Beta)': round(coef, 4),
-        '95% CI Lower': round(ci[0], 4),
-        '95% CI Upper': round(ci[1], 4),
-        'p-value': model.pvalues['log_price_ratio'],
-        'R-squared': round(model.rsquared, 4)
-    })
-
-# Convert to DataFrame and rank from most price-sensitive (most negative) to least
-elasticity_table = pd.DataFrame(results).sort_values('Elasticity (Beta)').reset_index(drop=True)
-elasticity_table.index = elasticity_table.index + 1  # 1-based ranking
-
-print("=== Category Price Elasticity Ranking (Model A) ===")
-print(elasticity_table[['Category', 'Elasticity (Beta)', '95% CI Lower', '95% CI Upper', 'R-squared']])
-
-# -------------------------------------------------------------------------
-# Step 3: Define Predictors & Compute Variance Inflation Factors (VIF)
-# -------------------------------------------------------------------------
-
-# 1. Construct a chronological weekly time trend (1 to 104)
-df['week_start'] = pd.to_datetime(df['week_start'])
-df['trend'] = (df['week_start'] - df['week_start'].min()).dt.days // 7 + 1
-
-# 2. Binary conversion for indicator variables
+# Extra columns used in the models
+df['trend'] = (df['week_start'] - df['week_start'].min()).dt.days // 7 + 1   # week number 1 to 104
 df['has_parking_binary'] = (df['has_parking'] == 'Yes').astype(int)
-
-# 3. Candidate predictor list including both operational scale metrics
-candidate_features = [
-    'log_price_ratio', 'promo_flag', 'size_sqm', 'staff_count',
-    'foot_traffic_index', 'competitors_2km', 'has_parking_binary',
-    'avg_temp_c', 'rainfall_mm', 'holiday_week', 'trend', 
-    'sin_season', 'cos_season'
-]
-
-# 4. Compute VIF for all candidate variables
-X_candidates = df[candidate_features].copy()
-X_candidates = sm.add_constant(X_candidates)
-
-vif_data = pd.DataFrame({
-    'Variable': X_candidates.columns,
-    'VIF': [variance_inflation_factor(X_candidates.values, i) for i in range(X_candidates.shape[1])]
-})
-
-# Display VIF excluding the intercept constant, sorted descending
-vif_table = vif_data[vif_data['Variable'] != 'const'].sort_values('VIF', ascending=False).reset_index(drop=True)
-
-print("=== Variance Inflation Factor (VIF) Audit ===")
-print(vif_table.to_string(index=False))
-
-# -------------------------------------------------------------------------
-# Step 4: Compare Model B Specifications (With vs. Without staff_count)
-# -------------------------------------------------------------------------
-
-# Model 1: Full specification containing collinear pair (size_sqm and staff_count)
-formula_collinear = (
-    'log_units ~ log_price_ratio + promo_flag + size_sqm + staff_count + '
-    'foot_traffic_index + competitors_2km + C(has_parking) + avg_temp_c + '
-    'rainfall_mm + holiday_week + trend + sin_season + cos_season'
-)
-model_with_staff = smf.ols(formula_collinear, data=df).fit()
-
-# Model 2: Parsimonious specification retaining physical floor capacity (size_sqm)
-formula_clean = (
-    'log_units ~ log_price_ratio + promo_flag + size_sqm + '
-    'foot_traffic_index + competitors_2km + C(has_parking) + avg_temp_c + '
-    'rainfall_mm + holiday_week + trend + sin_season + cos_season'
-)
-model_clean = smf.ols(formula_clean, data=df).fit()
-
-# Comparison summary
-comparison_df = pd.DataFrame({
-    'Metric': ['R-squared', 'Adj. R-squared', 'AIC', 'BIC', 'size_sqm Coef', 'size_sqm Std Err'],
-    'With staff_count (VIF ~ 33)': [
-        round(model_with_staff.rsquared, 4),
-        round(model_with_staff.rsquared_adj, 4),
-        round(model_with_staff.aic, 1),
-        round(model_with_staff.bic, 1),
-        f"{model_with_staff.params['size_sqm']:.6f}",
-        f"{model_with_staff.bse['size_sqm']:.7f}"
-    ],
-    'Without staff_count (VIF = 1.23)': [
-        round(model_clean.rsquared, 4),
-        round(model_clean.rsquared_adj, 4),
-        round(model_clean.aic, 1),
-        round(model_clean.bic, 1),
-        f"{model_clean.params['size_sqm']:.6f}",
-        f"{model_clean.bse['size_sqm']:.7f}"
-    ]
-})
-
-print("=== Model Comparison: Multicollinearity Resolution ===")
-print(comparison_df.to_string(index=False))
-
-# -------------------------------------------------------------------------
-# Step 5: Residual Diagnostics & Heteroscedasticity Assessment
-# -------------------------------------------------------------------------
-
-# 1. Extract fitted values and residuals from the clean Model B
-fitted_vals = model_clean.fittedvalues
-residuals = model_clean.resid
-
-# 2. Plot Residuals vs. Fitted and Normal Q-Q Plot
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-# Panel 1: Residuals vs Fitted Values
-sns.scatterplot(
-    x=fitted_vals,
-    y=residuals,
-    alpha=0.15,
-    s=15,
-    color='#1f77b4',
-    ax=axes[0]
-)
-axes[0].axhline(0, color='red', linestyle='--', linewidth=1.5)
-axes[0].set_title('Residuals vs. Fitted Values', fontsize=11, fontweight='bold')
-axes[0].set_xlabel('Fitted Values (log_units)')
-axes[0].set_ylabel('Residuals')
-
-# Panel 2: Normal Q-Q Plot
-sm.qqplot(residuals, line='45', fit=True, ax=axes[1], markerfacecolor='#1f77b4', markeredgecolor='none', alpha=0.15, markersize=3)
-axes[1].set_title('Normal Q-Q Plot', fontsize=11, fontweight='bold')
-axes[1].get_lines()[1].set_color('red')
-axes[1].get_lines()[1].set_linewidth(1.5)
-
-plt.suptitle('Model B: Residual Diagnostic Plots', fontsize=13, fontweight='bold', y=1.02)
-plt.tight_layout()
-
-# Save diagnostic figure at 300 DPI
-plt.savefig('figures/model_b_diagnostics.png', dpi=300, bbox_inches='tight')
-# 3. Breusch-Pagan Test for Heteroscedasticity
-bp_stat, bp_pval, f_stat, f_pval = het_breuschpagan(residuals, model_clean.model.exog)
-
-print("=== Breusch-Pagan Test Results ===")
-print(f"Lagrange Multiplier Statistic: {bp_stat:.2f}")
-print(f"p-value (LM Test):             {bp_pval:.4e}")
-print(f"F-Statistic:                   {f_stat:.2f}")
-print(f"p-value (F-Test):              {f_pval:.4e}")
-
-if bp_pval < 0.05:
-    print("\nResult: Significant heteroscedasticity detected (p < 0.05). Applying HC3 robust standard errors.")
-else:
-    print("\nResult: Homoscedasticity holds (p >= 0.05).")
-
-# 4. Refit Model B with HC3 Robust Standard Errors
-model_b_hc3 = smf.ols(formula_clean, data=df).fit(cov_type='HC3')
-
-# 5. Side-by-side standard error comparison table
-se_comparison = pd.DataFrame({
-    'Parameter': model_clean.params.index,
-    'Coefficient': model_clean.params.values.round(5),
-    'OLS Std Err': model_clean.bse.values.round(6),
-    'HC3 Std Err': model_b_hc3.bse.values.round(6),
-    'OLS p-value': model_clean.pvalues.values.round(5),
-    'HC3 p-value': model_b_hc3.pvalues.values.round(5)
-})
-
-print("\n=== Standard Errors Comparison (OLS vs. HC3 Robust) ===")
-print(se_comparison.to_string(index=False))
-
-# -------------------------------------------------------------------------
-# Step 6: Testing Domain Interaction Terms
-# -------------------------------------------------------------------------
-
-# 1. Create binary category indicators for domain interactions
 df['is_beverages'] = (df['category'] == 'Beverages').astype(int)
 df['is_fresh_produce'] = (df['category'] == 'Fresh Produce').astype(int)
 
-# 2. Base Model B specification (without interactions)
-formula_base = (
-    'log_units ~ log_price_ratio + promo_flag + size_sqm + '
-    'foot_traffic_index + competitors_2km + C(has_parking) + avg_temp_c + '
-    'rainfall_mm + holiday_week + trend + sin_season + cos_season'
-)
-model_base = smf.ols(formula_base, data=df).fit()
+print(f"Loaded {df.shape[0]:,} rows across {df['category'].nunique()} categories.")
 
-# Interaction 1: Promotional Responsiveness across Categories (promo × category)
-formula_int1 = (
-    'log_units ~ log_price_ratio + promo_flag * C(category) + size_sqm + '
-    'foot_traffic_index + competitors_2km + C(has_parking) + avg_temp_c + '
-    'rainfall_mm + holiday_week + trend + sin_season + cos_season'
-)
-model_int1 = smf.ols(formula_int1, data=df).fit()
+rows = []
+for category, data in df.groupby('category'):
+    model = smf.ols('log_units ~ log_price_ratio', data=data).fit()
+    low, high = model.conf_int().loc['log_price_ratio']
+    rows.append({
+        'category': category,
+        'elasticity': round(model.params['log_price_ratio'], 3),
+        'ci_95_lower': round(low, 3),
+        'ci_95_upper': round(high, 3),
+        'r_squared': round(model.rsquared, 3)
+    })
 
-# Interaction 2: Weather Sensitivity on Beverages (temperature × Beverages)
-formula_int2 = (
-    'log_units ~ log_price_ratio + promo_flag + size_sqm + '
-    'foot_traffic_index + competitors_2km + C(has_parking) + avg_temp_c * is_beverages + '
-    'rainfall_mm + holiday_week + trend + sin_season + cos_season'
-)
-model_int2 = smf.ols(formula_int2, data=df).fit()
+elasticity = pd.DataFrame(rows).sort_values('elasticity').reset_index(drop=True)
+elasticity.index = elasticity.index + 1   # rank 1 = most price-sensitive
+print((elasticity).to_string())
 
-# Interaction 3: Weather Sensitivity on Produce (rainfall × Fresh Produce)
-formula_int3 = (
-    'log_units ~ log_price_ratio + promo_flag + size_sqm + '
-    'foot_traffic_index + competitors_2km + C(has_parking) + avg_temp_c + '
-    'rainfall_mm * is_fresh_produce + holiday_week + trend + sin_season + cos_season'
-)
-model_int3 = smf.ols(formula_int3, data=df).fit()
+predictors = ['log_price_ratio', 'promo_flag', 'size_sqm', 'staff_count', 'foot_traffic_index',
+              'competitors_2km', 'has_parking_binary', 'avg_temp_c', 'rainfall_mm',
+              'holiday_week', 'trend', 'sin_season', 'cos_season']
 
-# Combined Specification: Use ':' for domain interactions to avoid duplicate category dummies
-formula_all_int = (
-    'log_units ~ log_price_ratio + promo_flag * C(category) + size_sqm + '
-    'foot_traffic_index + competitors_2km + C(has_parking) + '
-    'avg_temp_c + avg_temp_c:is_beverages + '
-    'rainfall_mm + rainfall_mm:is_fresh_produce + '
-    'holiday_week + trend + sin_season + cos_season'
-)
-model_all_int = smf.ols(formula_all_int, data=df).fit()
-
-# 3. Model Comparison Table
-interaction_comparison = pd.DataFrame({
-    'Model Specification': [
-        'Base Model B (No Interactions)',
-        'Model B + (promo × category)',
-        'Model B + (temperature × Beverages)',
-        'Model B + (rainfall × Fresh Produce)',
-        'Model B + All Three Interactions'
-    ],
-    'R-squared': [
-        model_base.rsquared,
-        model_int1.rsquared,
-        model_int2.rsquared,
-        model_int3.rsquared,
-        model_all_int.rsquared
-    ],
-    'Adj. R-squared': [
-        model_base.rsquared_adj,
-        model_int1.rsquared_adj,
-        model_int2.rsquared_adj,
-        model_int3.rsquared_adj,
-        model_all_int.rsquared_adj
-    ],
-    'AIC': [
-        model_base.aic,
-        model_int1.aic,
-        model_int2.aic,
-        model_int3.aic,
-        model_all_int.aic
-    ],
-    'BIC': [
-        model_base.bic,
-        model_int1.bic,
-        model_int2.bic,
-        model_int3.bic,
-        model_all_int.bic
-    ]
+X = sm.add_constant(df[predictors])
+vif = pd.DataFrame({
+    'predictor': X.columns,
+    'VIF': [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
 })
+vif = vif[vif['predictor'] != 'const'].sort_values('VIF', ascending=False).round(2)
+print(vif.to_string(index=False))
+print()
+print('Correlation between size_sqm and staff_count:', round(df['size_sqm'].corr(df['staff_count']), 3))
 
-print("=== Model Comparison: Testing Interaction Terms ===")
-print(interaction_comparison.round(4).to_string(index=False))
+formula_with_staff = 'log_units ~ log_price_ratio + promo_flag + size_sqm + staff_count + foot_traffic_index + competitors_2km + C(has_parking) + avg_temp_c + rainfall_mm + holiday_week + trend + sin_season + cos_season'
+formula_clean = 'log_units ~ log_price_ratio + promo_flag + size_sqm + foot_traffic_index + competitors_2km + C(has_parking) + avg_temp_c + rainfall_mm + holiday_week + trend + sin_season + cos_season'
 
-# 4. Display specific interaction coefficients and p-values
-print("\n--- Key Interaction Coefficients ---")
-print(f"Temperature × Beverages:    Coef = {model_int2.params['avg_temp_c:is_beverages']:+.4f} (p = {model_int2.pvalues['avg_temp_c:is_beverages']:.2e})")
-print(f"Rainfall × Fresh Produce:   Coef = {model_int3.params['rainfall_mm:is_fresh_produce']:+.4f} (p = {model_int3.pvalues['rainfall_mm:is_fresh_produce']:.2e})")
+model_with_staff = smf.ols(formula_with_staff, data=df).fit()
+model_clean = smf.ols(formula_clean, data=df).fit()
 
-# -------------------------------------------------------------------------
-# Step 7: Time-Based Validation Split & Out-of-Sample Benchmarking
-# -------------------------------------------------------------------------
+print((pd.DataFrame({
+    'with staff_count': [model_with_staff.rsquared, model_with_staff.aic, model_with_staff.params['size_sqm'], model_with_staff.bse['size_sqm']],
+    'without staff_count': [model_clean.rsquared, model_clean.aic, model_clean.params['size_sqm'], model_clean.bse['size_sqm']]
+}, index=['R-squared', 'AIC', 'size_sqm coefficient', 'size_sqm standard error']).round(7)).to_string())
 
-# 1. Temporal Split: Train on Weeks 1 to 80, Test on Weeks 81 to 104
-train_df = df[df['trend'] <= 80].copy()
-test_df = df[df['trend'] > 80].copy()
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-print(f"Training observations (Weeks  1-80):  {len(train_df):,} rows")
-print(f"Testing observations  (Weeks 81-104): {len(test_df):,} rows")
+sns.scatterplot(x=model_clean.fittedvalues, y=model_clean.resid, alpha=0.1, s=10, ax=axes[0])
+axes[0].axhline(0, color='red', linestyle='--')
+axes[0].set(title='Residuals vs fitted', xlabel='Fitted value (log units)', ylabel='Residual (log units)')
 
-# 2. Fit Model B specifications strictly on the training set
-# Specification A: Clean Multivariate Baseline (No Interactions)
-formula_base = (
-    'log_units ~ log_price_ratio + promo_flag + size_sqm + '
-    'foot_traffic_index + competitors_2km + C(has_parking) + avg_temp_c + '
-    'rainfall_mm + holiday_week + trend + sin_season + cos_season'
-)
-model_b_trained = smf.ols(formula_base, data=train_df).fit()
+sm.qqplot(model_clean.resid, line='45', fit=True, ax=axes[1], markersize=3, alpha=0.15)
+axes[1].set(title='Normal Q-Q plot', xlabel='Theoretical quantiles (standard deviations)', ylabel='Sample quantiles (standard deviations)')
 
-# Specification B: Full Interaction Specification
-formula_all_int = (
-    'log_units ~ log_price_ratio + promo_flag * C(category) + size_sqm + '
-    'foot_traffic_index + competitors_2km + C(has_parking) + '
-    'avg_temp_c + avg_temp_c:is_beverages + '
-    'rainfall_mm + rainfall_mm:is_fresh_produce + '
-    'holiday_week + trend + sin_season + cos_season'
-)
-model_all_trained = smf.ols(formula_all_int, data=train_df).fit()
+plt.suptitle('Model B: Residual Diagnostics')
+plt.tight_layout()
+plt.savefig('figures/model_b_diagnostics.png', dpi=300)
 
-# 3. Generate Predictions on the Test Set (Weeks 81-104)
-# Naive Lag-4 Baseline prediction: log of units sold 4 weeks prior
-y_test_log = test_df['log_units']
-pred_baseline_log = test_df['units_lag_4'].apply(math.log)
+lm_stat, lm_p, f_stat, f_p = het_breuschpagan(model_clean.resid, model_clean.model.exog)
+print(f"Breusch-Pagan: LM = {lm_stat:.2f}, p-value = {lm_p:.2e}")
+if lm_p < 0.05:
+    print('Heteroscedasticity found: using robust (HC3) standard errors.')
+else:
+    print('No heteroscedasticity found: ordinary standard errors are fine.')
 
-pred_model_b_log = model_b_trained.predict(test_df)
-pred_model_all_log = model_all_trained.predict(test_df)
+model_robust = smf.ols(formula_clean, data=df).fit(cov_type='HC3')
 
-# 4. Pure Pandas metric calculation function
-def evaluate_forecast(y_actual, y_predicted):
-    errors = y_actual - y_predicted
-    mae = errors.abs().mean()
-    rmse = math.sqrt((errors ** 2).mean())
-    ss_res = (errors ** 2).sum()
-    ss_tot = ((y_actual - y_actual.mean()) ** 2).sum()
-    r2 = 1.0 - (ss_res / ss_tot)
-    return round(rmse, 4), round(mae, 4), round(r2, 4)
+print((pd.DataFrame({
+    'coefficient': model_clean.params,
+    'OLS std error': model_clean.bse,
+    'HC3 std error': model_robust.bse,
+    'HC3 p-value': model_robust.pvalues
+}).round(5)).to_string())
 
-# 5. Compute performance metrics on the log_units scale
-b_rmse, b_mae, b_r2 = evaluate_forecast(y_test_log, pred_baseline_log)
-mb_rmse, mb_mae, mb_r2 = evaluate_forecast(y_test_log, pred_model_b_log)
-all_rmse, all_mae, all_r2 = evaluate_forecast(y_test_log, pred_model_all_log)
+base = smf.ols(formula_clean, data=df).fit()
 
-# 6. Summary Comparison Table
-test_evaluation_df = pd.DataFrame({
-    'Model': [
-        'Naive Baseline (Lag-4)',
-        'Model B (Multivariate Demand)',
-        'Model B (With All Interactions)'
-    ],
-    'Test RMSE': [b_rmse, mb_rmse, all_rmse],
-    'Test MAE': [b_mae, mb_mae, all_mae],
-    'Test Out-of-Sample R²': [b_r2, mb_r2, all_r2]
-})
+interaction_formulas = {
+    'promo x category': formula_clean + ' + C(category) + promo_flag:C(category)',
+    'temperature x Beverages': formula_clean + ' + is_beverages + avg_temp_c:is_beverages',
+    'rainfall x Fresh Produce': formula_clean + ' + is_fresh_produce + rainfall_mm:is_fresh_produce',
+    'all three': formula_clean + ' + C(category) + promo_flag:C(category) + avg_temp_c:is_beverages + rainfall_mm:is_fresh_produce'
+}
 
-print("\n=== Out-of-Sample Model Performance on Test Set (Weeks 81-104) ===")
-print(test_evaluation_df.to_string(index=False))
+rows = [{'model': 'Base Model B', 'R-squared': base.rsquared, 'adj R-squared': base.rsquared_adj,
+         'AIC': base.aic, 'BIC': base.bic, 'F-test p-value': None, 'improves model?': ''}]
 
-# -------------------------------------------------------------------------
-# Question 1: Promotional Profitability & Margin Dilution Audit
-# -------------------------------------------------------------------------
+for name, formula in interaction_formulas.items():
+    model = smf.ols(formula, data=df).fit()
+    p_value = sm.stats.anova_lm(base, model)['Pr(>F)'].iloc[1]
+    rows.append({'model': name, 'R-squared': model.rsquared, 'adj R-squared': model.rsquared_adj,
+                 'AIC': model.aic, 'BIC': model.bic, 'F-test p-value': p_value,
+                 'improves model?': 'Yes' if p_value < 0.05 and model.aic < base.aic else 'No'})
 
-# 1. Aggregate key metrics across category and promotion status
-promo_analysis = df.groupby(['category', 'promo_flag']).agg(
-    total_units=('units_sold', 'sum'),
-    total_revenue=('revenue_ngn', 'sum'),
-    total_gross_profit=('gross_profit', 'sum'),
-    avg_discount=('discount_pct', 'mean'),
-    weekly_records=('units_sold', 'count')
-).reset_index()
+print((pd.DataFrame(rows).round(4)).to_string())
 
-# 2. Derive weekly averages and margin rates
-promo_analysis['mean_weekly_units'] = promo_analysis['total_units'] / promo_analysis['weekly_records']
-promo_analysis['gross_margin_pct'] = (promo_analysis['total_gross_profit'] / promo_analysis['total_revenue']) * 100
-promo_analysis['profit_per_unit_ngn'] = promo_analysis['total_gross_profit'] / promo_analysis['total_units']
+train = df[df['trend'] <= 80]
+test = df[df['trend'] > 80]
+print(f"Train: {len(train):,} rows (weeks 1-80). Test: {len(test):,} rows (weeks 81-104).")
 
-# 3. Pivot to compute exact baseline vs promo lift side-by-side
-pivot_units = promo_analysis.pivot(index='category', columns='promo_flag', values='mean_weekly_units')
-pivot_margin = promo_analysis.pivot(index='category', columns='promo_flag', values='gross_margin_pct')
-pivot_unit_profit = promo_analysis.pivot(index='category', columns='promo_flag', values='profit_per_unit_ngn')
-pivot_total_profit = promo_analysis.pivot(index='category', columns='promo_flag', values='total_gross_profit')
+model_b_train = smf.ols(formula_clean, data=train).fit()
+model_all_train = smf.ols(interaction_formulas['all three'], data=train).fit()
 
-# 4. Construct comprehensive executive summary table
-promo_summary = pd.DataFrame({
-    'Base Units/Wk': pivot_units[0].round(1),
-    'Promo Units/Wk': pivot_units[1].round(1),
-    'Volume Lift (%)': (((pivot_units[1] - pivot_units[0]) / pivot_units[0]) * 100).round(2),
-    'Base Margin (%)': pivot_margin[0].round(2),
-    'Promo Margin (%)': pivot_margin[1].round(2),
-    'Margin Compression (pts)': (pivot_margin[1] - pivot_margin[0]).round(2),
-    'Base Profit/Unit (NGN)': pivot_unit_profit[0].round(2),
-    'Promo Profit/Unit (NGN)': pivot_unit_profit[1].round(2),
-    'Total Promo Profit (M NGN)': (pivot_total_profit[1] / 1e6).round(2),
-    'Total Base Profit (M NGN)': (pivot_total_profit[0] / 1e6).round(2)
-}).sort_values('Volume Lift (%)', ascending=False)
+predictions = {
+    'Naive lag-4 baseline': test['units_lag_4'].apply(math.log),
+    'Model B': model_b_train.predict(test),
+    'Model B + interactions': model_all_train.predict(test)
+}
 
-# 5. Classify commercial promotion effectiveness
-# Profitable lift requires: Volume Lift % > Breakeven Lift %
-promo_summary['Effectiveness'] = promo_summary['Volume Lift (%)'].apply(
-    lambda x: 'High Profit Driver' if x > 60 else ('Marginal / Selective' if x > 45 else 'Margin Dilutive')
-)
+def score(actual, predicted):
+    error = actual - predicted
+    rmse = (error ** 2).mean() ** 0.5
+    mae = error.abs().mean()
+    r2 = 1 - (error ** 2).sum() / ((actual - actual.mean()) ** 2).sum()
+    return rmse, mae, r2
 
-print("=== Executive Table: Promotional Lift & Margin Compression ===")
-print(promo_summary.to_string())
+results = pd.DataFrame(
+    [score(test['log_units'], predicted) for predicted in predictions.values()],
+    index=predictions.keys(), columns=['RMSE', 'MAE', 'R-squared']
+).round(4)
+print((results).to_string())
 
-# -------------------------------------------------------------------------
-# SKU-Level Audit: Identifying Value-Destroying Promotions
-# -------------------------------------------------------------------------
+plot_data = results.reset_index().rename(columns={'index': 'model'})
 
-sku_promo = df.groupby(['product_id', 'category', 'promo_flag']).agg(
-    mean_units=('units_sold', 'mean'),
-    mean_margin=('margin_pct', 'mean'),
-    total_profit=('gross_profit', 'sum')
-).unstack('promo_flag')
+plt.figure(figsize=(8, 4))
+sns.barplot(data=plot_data, x='model', y='RMSE', hue='model', legend=False)
+plt.title('Test-Set Error by Model (weeks 81 to 104)')
+plt.xlabel('Model')
+plt.ylabel('RMSE (log units; lower is better)')
+plt.tight_layout()
+plt.savefig('figures/model_test_rmse.png', dpi=300)
 
-sku_eval = pd.DataFrame({
-    'Category': sku_promo['mean_units'].index.map(df.drop_duplicates('product_id').set_index('product_id')['category']),
-    'Observed Lift (%)': ((sku_promo['mean_units'][1] - sku_promo['mean_units'][0]) / sku_promo['mean_units'][0]) * 100,
-    'Base Margin (%)': sku_promo['mean_margin'][0],
-    'Promo Margin (%)': sku_promo['mean_margin'][1],
-    'Total Profit Promo (NGN)': sku_promo['total_profit'][1],
-    'Total Profit Base (NGN)': sku_promo['total_profit'][0]
-})
+def promo_table(by):
+    means = df.groupby(by + ['promo_flag'])[['units_sold', 'gross_profit']].mean().unstack()
+    out = pd.DataFrame({
+        'units_base': means['units_sold'][0], 'units_promo': means['units_sold'][1],
+        'profit_base': means['gross_profit'][0], 'profit_promo': means['gross_profit'][1]
+    })
+    out['volume_lift_pct'] = (out['units_promo'] / out['units_base'] - 1) * 100
+    out['breakeven_lift_pct'] = ((out['profit_base'] / out['units_base']) / (out['profit_promo'] / out['units_promo']) - 1) * 100
+    out['profit_change_pct'] = (out['profit_promo'] / out['profit_base'] - 1) * 100
+    out['verdict'] = out['profit_change_pct'].apply(lambda x: 'Loses money' if x < 0 else 'Makes money')
+    return out.round(1)
 
-# Required lift to preserve gross profit cash value given margin loss
-sku_eval['Breakeven Lift (%)'] = (
-    (sku_eval['Base Margin (%)'] - sku_eval['Promo Margin (%)']) / (sku_eval['Promo Margin (%)'] / 100)
-)
+by_category = promo_table(['category']).sort_values('profit_change_pct', ascending=False)
+by_product = promo_table(['category', 'product_id']).sort_values('profit_change_pct', ascending=False)
 
-# Flag SKUs that fail to meet breakeven lift
-sku_eval['Promo Verdict'] = sku_eval.apply(
-    lambda row: 'Value Accretive' if row['Observed Lift (%)'] >= row['Breakeven Lift (%)'] else 'Profit Destroyer',
-    axis=1
-)
-
-sku_eval = sku_eval.sort_values('Observed Lift (%)', ascending=False)
-
-print("\n=== Product-Level Promotional Verdict ===")
-print(sku_eval[['Category', 'Observed Lift (%)', 'Breakeven Lift (%)', 'Promo Verdict']].round(2))
-
-# -------------------------------------------------------------------------
-# Question 2: Competitor Density, Foot Traffic & Cannibalisation
-# -------------------------------------------------------------------------
-
-# 1. Aggregate lifetime operational performance by store
-store_summary = df.groupby([
-    'store_id', 'city', 'area', 'store_type', 
-    'size_sqm', 'staff_count', 'competitors_2km', 'has_parking'
-]).agg(
-    total_revenue_ngn=('revenue_ngn', 'sum'),
-    total_units_sold=('units_sold', 'sum'),
-    mean_foot_traffic=('foot_traffic_index', 'mean'),
-    weekly_gross_profit=('gross_profit', 'mean'),
-    total_weeks=('week_start', 'nunique')
-).reset_index()
-
-# 2. Derive unit economics and operational intensity ratios
-store_summary['annualised_revenue_m_ngn'] = (store_summary['total_revenue_ngn'] / store_summary['total_weeks'] * 52) / 1e6
-store_summary['rev_per_sqm'] = store_summary['total_revenue_ngn'] / store_summary['size_sqm']
-store_summary['rev_per_staff_m_ngn'] = (store_summary['total_revenue_ngn'] / store_summary['staff_count']) / 1e6
-store_summary['units_per_traffic_pt'] = store_summary['total_units_sold'] / (store_summary['mean_foot_traffic'] * store_summary['total_weeks'])
-
-# 3. Bin competitor density into analytical competition brackets
-store_summary['competitor_tier'] = pd.cut(
-    store_summary['competitors_2km'],
-    bins=[-0.1, 2, 5, 12],
-    labels=['Low (0-2)', 'Moderate (3-5)', 'High (6+)']
-)
-
-# 4. Group by competitor bracket to assess direct economic impact
-comp_tier_impact = store_summary.groupby('competitor_tier', observed=True).agg(
-    store_count=('store_id', 'count'),
-    mean_traffic=('mean_foot_traffic', 'mean'),
-    mean_rev_per_sqm=('rev_per_sqm', 'mean'),
-    mean_rev_per_staff_m=('rev_per_staff_m_ngn', 'mean'),
-    mean_annual_revenue_m=('annualised_revenue_m_ngn', 'mean')
-).round(2)
-
-print("=== Competitor Density Impact Across Brackets ===")
-print(comp_tier_impact.to_string())
-
-# 5. Measure correlation between competitors_2km and key KPIs
-kpis = ['mean_foot_traffic', 'rev_per_sqm', 'rev_per_staff_m_ngn', 'annualised_revenue_m_ngn']
-corr_with_comp = store_summary[['competitors_2km'] + kpis].corr()['competitors_2km'].drop('competitors_2km').round(3)
-
-print("\n=== Linear Correlation: Competitors within 2km vs. Store KPIs ===")
-for kpi, r_val in corr_with_comp.items():
-    print(f"Competitors vs {kpi:<24}: r = {r_val:+.3f}")
-
-# -------------------------------------------------------------------------
-# Visualization: Store Performance under Local Competition
-# -------------------------------------------------------------------------
+print(by_category[['volume_lift_pct', 'breakeven_lift_pct', 'profit_change_pct', 'verdict']].to_string())
+print()
+print(by_product[['volume_lift_pct', 'breakeven_lift_pct', 'profit_change_pct', 'verdict']].to_string())
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-# Panel 1: Foot Traffic Index vs. Competitor Density by Store Type
-sns.regplot(
-    data=store_summary,
-    x='competitors_2km',
-    y='mean_foot_traffic',
-    scatter=False,
-    color='#e74c3c',
-    ax=axes[0]
-)
-sns.scatterplot(
-    data=store_summary,
-    x='competitors_2km',
-    y='mean_foot_traffic',
-    hue='store_type',
-    style='store_type',
-    palette='deep',
-    s=85,
-    ax=axes[0]
-)
-axes[0].set_title('Foot Traffic Index vs. Competitors within 2km', fontsize=11, fontweight='bold')
-axes[0].set_xlabel('Competitor Outlets within 2km')
-axes[0].set_ylabel('Mean Weekly Foot Traffic Index')
-axes[0].grid(True, linestyle='--', alpha=0.5)
+sns.barplot(data=by_category.reset_index(), y='category', x='profit_change_pct', color='steelblue', ax=axes[0])
+axes[0].axvline(0, color='black')
+axes[0].set(title='By category', xlabel='Change in gross profit during promotion (%)', ylabel='Category')
 
-# Panel 2: Revenue per Sqm vs. Competitor Density
-sns.regplot(
-    data=store_summary,
-    x='competitors_2km',
-    y='rev_per_sqm',
-    scatter=False,
-    color='#2ecc71',
-    ax=axes[1]
-)
-sns.scatterplot(
-    data=store_summary,
-    x='competitors_2km',
-    y='rev_per_sqm',
-    hue='store_type',
-    style='store_type',
-    palette='deep',
-    s=85,
-    legend=False,
-    ax=axes[1]
-)
-axes[1].set_title('Revenue per Sqm vs. Competitors within 2km', fontsize=11, fontweight='bold')
-axes[1].set_xlabel('Competitor Outlets within 2km')
-axes[1].set_ylabel('Lifetime Revenue / Size Sqm (NGN)')
-axes[1].yaxis.set_major_formatter('{x:,.0f}')
-axes[1].grid(True, linestyle='--', alpha=0.5)
+product_plot = by_product.reset_index()
+product_plot['product'] = product_plot['product_id'] + ' (' + product_plot['category'] + ')'
+sns.barplot(data=product_plot, y='product', x='profit_change_pct', color='steelblue', ax=axes[1])
+axes[1].axvline(0, color='black')
+axes[1].set(title='By product', xlabel='Change in gross profit during promotion (%)', ylabel='Product')
 
-plt.suptitle('Figure Q2: Competitive Density & Spatial Performance', fontsize=13, fontweight='bold', y=1.02)
+plt.suptitle('Question 1: Profit Effect of Promotions (per store-product-week)')
 plt.tight_layout()
+plt.savefig('figures/fig_q1_promo_profit.png', dpi=300)
 
-# Save at 300 DPI
-plt.savefig('figures/fig_q2_competition_cannibalisation.png', dpi=300, bbox_inches='tight')
-print("Saved competitive analysis figure to figures/fig_q2_competition_cannibalisation.png")
+discounts = [0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+controls = ('size_sqm + foot_traffic_index + competitors_2km + C(has_parking) + avg_temp_c + '
+            'rainfall_mm + holiday_week + trend + sin_season + cos_season')
 
-# -------------------------------------------------------------------------
-# Format Vulnerability: Revenue per Sqm Sensitivity to Competitors
-# -------------------------------------------------------------------------
+rows = []
+betas = {}
+for category, data in df.groupby('category'):
+    model = smf.ols('log_units ~ discount_pct + ' + controls, data=data).fit()
+    beta = model.params['discount_pct']
+    betas[category] = round(beta, 2)
+    cost_share = (data['unit_cost_ngn'] / data['list_price_ngn']).mean()
+    for d in discounts:
+        units_index = math.exp(beta * d)
+        rows.append({
+            'category': category,
+            'discount_pct': d * 100,
+            'revenue_index': (1 - d) * units_index,
+            'profit_index': units_index * ((1 - d) - cost_share) / (1 - cost_share)
+        })
 
-format_comp = store_summary.groupby(['store_type', 'competitor_tier'], observed=True).agg(
-    store_count=('store_id', 'count'),
-    mean_rev_per_sqm=('rev_per_sqm', 'mean'),
-    mean_foot_traffic=('mean_foot_traffic', 'mean')
-).round(1).reset_index()
+curves = pd.DataFrame(rows)
 
-print("=== Store Format Performance Across Competition Tiers ===")
-print(format_comp.to_string(index=False))
+best_revenue = curves.loc[curves.groupby('category')['revenue_index'].idxmax(), ['category', 'discount_pct', 'revenue_index']]
+best_profit = curves.loc[curves.groupby('category')['profit_index'].idxmax(), ['category', 'discount_pct', 'profit_index']]
 
-# -------------------------------------------------------------------------
-# Question 3: Perishability, Shelf Life & Seasonal Spoilage Risk
-# -------------------------------------------------------------------------
+answer = best_revenue.merge(best_profit, on='category', suffixes=('_revenue', '_profit'))
+answer['discount_beta'] = answer['category'].map(betas)
+print((answer.round(2).rename(columns={'discount_pct_revenue': 'revenue-maximising discount (%)',
+                                'discount_pct_profit': 'profit-maximising discount (%)'})).to_string())
 
-# 1. Isolate perishable product categories (Fresh Produce and Dairy)
-perishables = df[df['is_perishable'] == 1].copy()
+print('Observations at each discount level:')
+print((df['discount_pct'] * 100).round().astype(int).value_counts().sort_index().to_string())
 
-# 2. Summary of baseline shelf-life parameters by category and SKU
-sku_spoilage_profile = perishables.groupby(['category', 'product_id']).agg(
-    shelf_life_days=('shelf_life_days', 'first'),
-    unit_cost_ngn=('unit_cost_ngn', 'first'),
-    list_price_ngn=('list_price_ngn', 'first'),
-    mean_weekly_units=('units_sold', 'mean'),
-    std_weekly_units=('units_sold', 'std')
-).reset_index()
-
-# 3. Calculate coefficient of variation (demand volatility)
-sku_spoilage_profile['demand_cv'] = (
-    sku_spoilage_profile['std_weekly_units'] / sku_spoilage_profile['mean_weekly_units']
-).round(3)
-
-# Effective replenishment cycle (Weekly store delivery cycle = 7 days)
-sku_spoilage_profile['shelf_life_to_cycle_ratio'] = (
-    sku_spoilage_profile['shelf_life_days'] / 7.0
-).round(2)
-
-print("=== Perishable SKU Spoilage Risk Profile ===")
-print(sku_spoilage_profile.to_string(index=False))
-
-# -------------------------------------------------------------------------
-# Demand Volatility Under Seasonal Weather Swings
-# -------------------------------------------------------------------------
-
-# 1. Define weather shock thresholds using Pandas quantiles
-temp_q75 = df['avg_temp_c'].quantile(0.75)
-rain_q75 = df['rainfall_mm'].quantile(0.75)
-
-# 2. Tag weather conditions
-df['weather_regime'] = 'Baseline'
-df['weather_regime'] = df['weather_regime'].mask(
-    df['avg_temp_c'] > temp_q75, 'High Heat'
-).mask(
-    df['rainfall_mm'] > rain_q75, 'Heavy Rain'
-).mask(
-    (df['avg_temp_c'] > temp_q75) & (df['rainfall_mm'] > rain_q75), 'Heat + Rain'
-)
-
-# 3. Aggregate Fresh Produce and Dairy sales performance across regimes
-weather_perish_impact = df[df['category'].isin(['Fresh Produce', 'Dairy'])].groupby(
-    ['category', 'weather_regime']
-).agg(
-    mean_units=('units_sold', 'mean'),
-    median_units=('units_sold', 'median'),
-    unit_volatility=('units_sold', 'std'),
-    mean_revenue=('revenue_ngn', 'mean'),
-    observations=('units_sold', 'count')
-).reset_index()
-
-# 4. Compute deviation percentage from baseline
-baseline_units = weather_perish_impact[weather_perish_impact['weather_regime'] == 'Baseline'].set_index('category')['mean_units']
-weather_perish_impact['pct_deviation_from_base'] = weather_perish_impact.apply(
-    lambda row: ((row['mean_units'] - baseline_units[row['category']]) / baseline_units[row['category']]) * 100,
-    axis=1
-).round(2)
-
-print("\n=== Perishable Performance Across Weather Regimes ===")
-print(weather_perish_impact[['category', 'weather_regime', 'mean_units', 'unit_volatility', 'pct_deviation_from_base']].to_string(index=False))
-
-# -------------------------------------------------------------------------
-# Estimated Spoilage Cost & Markdown Exposure Model
-# -------------------------------------------------------------------------
-
-# Assume standard retail buffer stock target: 1.5x standard deviation of weekly demand
-spoilage_model = perishables.groupby(['category', 'product_id', 'store_type']).agg(
-    mean_weekly_demand=('units_sold', 'mean'),
-    demand_sd=('units_sold', 'std'),
-    unit_cost=('unit_cost_ngn', 'first'),
-    list_price=('list_price_ngn', 'first'),
-    shelf_life=('shelf_life_days', 'first')
-).reset_index()
-
-# Buffer stock policy: 1.65 * SD (approx. 95% service level)
-spoilage_model['buffer_units'] = (1.65 * spoilage_model['demand_sd']).round(1)
-
-# In adverse weather (Heavy Rain), demand drops ~8-12%. 
-# Units stranded on shelf beyond replenishment cycle are subject to waste:
-spoilage_model['estimated_spoilage_pct'] = spoilage_model['shelf_life'].apply(
-    lambda days: 0.12 if days <= 7 else (0.07 if days <= 14 else 0.03)
-)
-
-spoilage_model['weekly_spoiled_units'] = (spoilage_model['mean_weekly_demand'] * spoilage_model['estimated_spoilage_pct']).round(1)
-spoilage_model['weekly_waste_cost_ngn'] = spoilage_model['weekly_spoiled_units'] * spoilage_model['unit_cost']
-spoilage_model['annual_waste_cost_m_ngn'] = (spoilage_model['weekly_waste_cost_ngn'] * 52) / 1e6
-
-# Summary by category
-category_waste_summary = spoilage_model.groupby('category').agg(
-    total_skus=('product_id', 'nunique'),
-    mean_shelf_life=('shelf_life', 'mean'),
-    weekly_waste_units=('weekly_spoiled_units', 'sum'),
-    annual_waste_cost_m_ngn=('annual_waste_cost_m_ngn', 'sum')
-).round(2).reset_index()
-
-print("\n=== Annual Spoilage Cost Exposure (Chain-Level) ===")
-print(category_waste_summary.to_string(index=False))
-
-# -------------------------------------------------------------------------
-# Figure Q3: Seasonal Perishability Volatility & Shelf-Life Stress (Fixed)
-# -------------------------------------------------------------------------
-
-fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-
-# Panel 1: Demand Variation Across Weather Regimes for Perishables
-sns.barplot(
-    data=weather_perish_impact,
-    x='weather_regime',
-    y='mean_units',
-    hue='category',
-    palette=['#2ecc71', '#3498db'],
-    ax=axes[0]
-)
-axes[0].set_title('Mean Weekly Sales Under Weather Regimes', fontsize=11, fontweight='bold')
-axes[0].set_xlabel('Weather Regime')
-axes[0].set_ylabel('Mean Weekly Units Sold')
-axes[0].legend(title='Category', loc='lower right')
-axes[0].grid(True, linestyle='--', alpha=0.5)
-
-# Panel 2: Demand Volatility (Std Dev) vs. Shelf Life
-sns.scatterplot(
-    data=sku_spoilage_profile,
-    x='shelf_life_days',
-    y='std_weekly_units',
-    hue='category',
-    size='unit_cost_ngn',
-    sizes=(60, 220),
-    palette=['#2ecc71', '#3498db'],
-    ax=axes[1]
-)
-axes[1].axvline(7, color='red', linestyle='--', linewidth=1.2, label='1-Week Delivery Cycle')
-axes[1].set_title('Demand Volatility vs. Shelf-Life Thresholds', fontsize=11, fontweight='bold')
-axes[1].set_xlabel('Product Shelf Life (Days)')
-axes[1].set_ylabel('Weekly Demand Standard Deviation (Units)')
-axes[1].grid(True, linestyle='--', alpha=0.5)
-
-# Place the legend cleanly outside the right border without axis clipping
-sns.move_legend(
-    axes[1],
-    loc="upper left",
-    bbox_to_anchor=(1.02, 1),
-    frameon=True,
-    title='Category & Cost'
-)
-
-plt.suptitle('Figure Q3: Perishability Exposure & Seasonal Weather Sensitivity', fontsize=13, fontweight='bold', y=1.02)
+plt.figure(figsize=(9, 5))
+sns.lineplot(data=curves, x='discount_pct', y='revenue_index', hue='category', marker='o')
+plt.title('Question 2: Revenue Index by Discount Level')
+plt.xlabel('Discount (% off list price)')
+plt.ylabel('Revenue index (1.00 = no discount)')
+plt.legend(title='Category', bbox_to_anchor=(1.02, 1), loc='upper left')
 plt.tight_layout()
+plt.savefig('figures/fig_q2_revenue_vs_discount.png', dpi=300)
 
-# Save at 300 DPI with tight bounding box to accommodate the exterior legend
-plt.savefig('figures/fig_q3_perishability_spoilage.png', dpi=300, bbox_inches='tight')
-print("Saved clean Figure Q3 without legend overlap to figures/fig_q3_perishability_spoilage.png")
+df['residual'] = model_clean.resid
 
-# -------------------------------------------------------------------------
-# Question 4: Customer Segmentation & RFM Churn Analysis
-# -------------------------------------------------------------------------
+store_gap = df.groupby('store_id').agg(
+    mean_residual=('residual', 'mean'),
+    std_residual=('residual', 'std'),
+    rows=('residual', 'size'),
+    city=('city', 'first'),
+    store_type=('store_type', 'first'),
+    size_sqm=('size_sqm', 'first'),
+    foot_traffic=('foot_traffic_index', 'first'),
+    competitors=('competitors_2km', 'first')
+).reset_index()
 
-# 1. Load the Customer dataset
-excel_file = 'Brainpals_sales_analytics.xlsx'
-customers = pd.read_excel(excel_file, sheet_name='Customers')
+store_gap['gap_vs_prediction_pct'] = store_gap['mean_residual'].apply(lambda r: (math.exp(r) - 1) * 100)
+store_gap['t_statistic'] = store_gap['mean_residual'] / (store_gap['std_residual'] / store_gap['rows'] ** 0.5)
+store_gap = store_gap.sort_values('gap_vs_prediction_pct').reset_index(drop=True)
 
-# Identify relevant columns dynamically
-spend_col = [c for c in customers.columns if 'spend' in c][0]
-visits_col = [c for c in customers.columns if 'visit' in c][0]
-tier_col = [c for c in customers.columns if 'tier' in c or 'loyalty' in c][0]
-recency_col = [c for c in customers.columns if 'recency' in c or 'last' in c or 'days' in c]
+print((store_gap.head(5)[['store_id', 'city', 'store_type', 'size_sqm', 'foot_traffic', 'competitors',
+                   'gap_vs_prediction_pct', 't_statistic']].round(1)).to_string())
 
-# Standardise loyalty tier strings
-customers[tier_col] = customers[tier_col].astype(str).str.strip().str.title()
+store_gap['group'] = store_gap.index.map(lambda i: 'Bottom 5' if i < 5 else 'Other stores')
 
-# If an explicit recency column exists, use it; otherwise, derive days since last transaction
-if recency_col:
-    r_feature = recency_col[0]
-else:
-    # Use average inter-purchase interval proxy if recency is not directly recorded
-    customers['days_since_last_visit'] = ((104 * 7) / (customers[visits_col] + 1)).round(1)
-    r_feature = 'days_since_last_visit'
+plt.figure(figsize=(9, 9))
+sns.barplot(data=store_gap, y='store_id', x='gap_vs_prediction_pct', hue='group',
+            palette={'Bottom 5': 'crimson', 'Other stores': 'lightgray'}, dodge=False)
+plt.axvline(0, color='black')
+plt.title('Question 3: Store Sales vs Model B Prediction')
+plt.xlabel('Actual sales vs prediction (%)')
+plt.ylabel('Store')
+plt.legend(title='')
+plt.tight_layout()
+plt.savefig('figures/fig_q3_store_residuals.png', dpi=300)
 
-# 2. Compute RFM Quantiles (1 = Lowest, 4 = Highest)
-# Recency: Lower days is better -> reverse scoring (qcut ranked inversely)
-customers['R_Score'] = pd.qcut(customers[r_feature], q=4, labels=[4, 3, 2, 1]).astype(int)
-customers['F_Score'] = pd.qcut(customers[visits_col].rank(method='first'), q=4, labels=[1, 2, 3, 4]).astype(int)
-customers['M_Score'] = pd.qcut(customers[spend_col].rank(method='first'), q=4, labels=[1, 2, 3, 4]).astype(int)
+weekly = df.groupby('week_start').agg(
+    revenue=('revenue_ngn', 'sum'), units=('units_sold', 'sum'), cpi=('cpi_index', 'mean')
+).reset_index()
+weekly['real_revenue'] = weekly['revenue'] / weekly['cpi'] * 100
 
-# Combined RFM Score string
-customers['RFM_Segment'] = customers['R_Score'].astype(str) + customers['F_Score'].astype(str) + customers['M_Score'].astype(str)
+first = weekly.head(13).mean(numeric_only=True)
+last = weekly.tail(13).mean(numeric_only=True)
 
-# 3. Define Customer Behavioral Segments
-def assign_segment(row):
-    r, f, m = row['R_Score'], row['F_Score'], row['M_Score']
-    if r >= 3 and f >= 3 and m >= 3:
-        return 'Champions / Core Loyal'
-    elif r >= 3 and f <= 2:
+nominal = last['revenue'] / first['revenue'] - 1
+volume = last['units'] / first['units'] - 1
+price_per_unit = (last['revenue'] / last['units']) / (first['revenue'] / first['units']) - 1
+inflation = last['cpi'] / first['cpi'] - 1
+real = last['real_revenue'] / first['real_revenue'] - 1
+price_mix = (1 + price_per_unit) / (1 + inflation) - 1
+
+def share(growth):
+    return math.log(1 + growth) / math.log(1 + nominal) * 100
+
+summary = pd.DataFrame({
+    'growth_pct': [nominal * 100, volume * 100, price_per_unit * 100, inflation * 100, price_mix * 100, real * 100],
+    'share_of_nominal_growth_pct': [100, share(volume), share(price_per_unit), share(inflation), share(price_mix), None]
+}, index=['Nominal revenue', 'Real volume (units sold)', 'Average price per unit', 'Inflation (CPI)',
+          'Price and mix beyond inflation', 'Real revenue (CPI-adjusted)']).round(1)
+print((summary).to_string())
+
+indexed = weekly.copy()
+for column in ['revenue', 'units', 'cpi', 'real_revenue']:
+    indexed[column] = indexed[column] / first[column] * 100
+
+indexed = indexed.rename(columns={'revenue': 'Nominal revenue', 'units': 'Units sold',
+                                  'cpi': 'CPI (inflation)', 'real_revenue': 'Real revenue (CPI-adjusted)'})
+indexed = indexed.melt(id_vars='week_start', value_vars=['Nominal revenue', 'Units sold', 'CPI (inflation)',
+                                                         'Real revenue (CPI-adjusted)'],
+                       var_name='measure', value_name='index')
+
+plt.figure(figsize=(11, 5))
+sns.lineplot(data=indexed, x='week_start', y='index', hue='measure')
+plt.title('Question 4: Revenue Growth, Volume and Inflation')
+plt.xlabel('Week starting (date)')
+plt.ylabel('Index (average of first 13 weeks = 100)')
+plt.legend(title='')
+plt.tight_layout()
+plt.savefig('figures/fig_q4_growth_decomposition.png', dpi=300)
+
+customers = pd.read_excel('Brainpals_sales_analytics.xlsx', sheet_name='Customers')
+customers['age'] = customers['age'].where(customers['age'].between(1, 100))   # impossible ages become blank
+
+# RFM scores: 4 is best. Recency: fewer days since the last visit is better.
+customers['R'] = pd.qcut(customers['days_since_last_visit'], q=4, labels=[4, 3, 2, 1]).astype(int)
+customers['F'] = pd.qcut(customers['visits_12m'].rank(method='first'), q=4, labels=[1, 2, 3, 4]).astype(int)
+customers['M'] = pd.qcut(customers['total_spend_12m_ngn'].rank(method='first'), q=4, labels=[1, 2, 3, 4]).astype(int)
+
+def segment(row):
+    if row['R'] >= 3 and row['F'] >= 3 and row['M'] >= 3:
+        return 'Champions'
+    elif row['R'] >= 3 and row['F'] <= 2:
         return 'Recent / Promising'
-    elif r <= 2 and (f >= 3 or m >= 3):
-        return 'At Risk (High-Value Inactive)'
-    elif r <= 2 and f <= 2 and m <= 2:
-        return 'Hibernating / Lapsed'
+    elif row['R'] <= 2 and (row['F'] >= 3 or row['M'] >= 3):
+        return 'At Risk (high value, inactive)'
+    elif row['R'] <= 2 and row['F'] <= 2 and row['M'] <= 2:
+        return 'Hibernating'
     else:
         return 'Standard Active'
 
-customers['Customer_Segment'] = customers.apply(assign_segment, axis=1)
+customers['segment'] = customers.apply(segment, axis=1)
 
-# 4. Cohort Summary Table
-segment_summary = customers.groupby('Customer_Segment').agg(
-    customer_count=('customer_id' if 'customer_id' in customers.columns else visits_col, 'count'),
-    mean_spend_ngn=(spend_col, 'mean'),
-    total_spend_m_ngn=(spend_col, lambda x: x.sum() / 1e6),
-    mean_visits=(visits_col, 'mean'),
-    mean_recency_days=(r_feature, 'mean')
-).round(2).sort_values('total_spend_m_ngn', ascending=False).reset_index()
+segments = customers.groupby('segment').agg(
+    customers=('customer_id', 'count'),
+    churn_rate_pct=('churned_next_90d', lambda s: s.mean() * 100),
+    total_spend_m_ngn=('total_spend_12m_ngn', lambda s: s.sum() / 1e6)
+).sort_values('churn_rate_pct', ascending=False).round(1)
 
-# Calculate revenue share
-segment_summary['revenue_share_pct'] = (
-    (segment_summary['total_spend_m_ngn'] / segment_summary['total_spend_m_ngn'].sum()) * 100
-).round(2)
+print(f"Overall churn rate: {customers['churned_next_90d'].mean() * 100:.1f}%")
+print()
+print(segments)
+print()
+print(customers.groupby('loyalty_tier')['churned_next_90d'].mean().mul(100).round(1).to_string())
 
-print("=== Customer Behavioral Segmentation Summary ===")
-print(segment_summary.to_string(index=False))
+# Logistic regression. Total spend is left out because it equals visits x basket size.
+features = ['days_since_last_visit', 'visits_12m', 'avg_basket_ngn', 'discount_usage_ratio',
+            'tenure_yrs', 'age', 'loyalty_member']
 
-# -------------------------------------------------------------------------
-# High-Value Churn Exposure Analysis
-# -------------------------------------------------------------------------
+model_data = customers[features + ['churned_next_90d']].copy()
+model_data['loyalty_member'] = (model_data['loyalty_member'] == 'Yes').astype(int)
+model_data = model_data.dropna()
 
-# Cross-tabulate Loyalty Tier against Customer Behavioral Segment
-tier_churn_crosstab = pd.crosstab(
-    customers[tier_col],
-    customers['Customer_Segment'],
-    margins=True,
-    margins_name='Total'
-)
+# Standardise every driver so the coefficients can be compared fairly
+for column in features:
+    model_data[column] = (model_data[column] - model_data[column].mean()) / model_data[column].std()
 
-print("\n=== Customer Distribution: Loyalty Tier vs. Segment ===")
-print(tier_churn_crosstab)
+logit = smf.logit('churned_next_90d ~ ' + ' + '.join(features), data=model_data).fit(disp=0)
 
-# Financial exposure from "At Risk" shoppers (Gold and Platinum)
-at_risk_loyal = customers[
-    (customers['Customer_Segment'] == 'At Risk (High-Value Inactive)') &
-    (customers[tier_col].isin(['Gold', 'Platinum']))
-]
+drivers = pd.DataFrame({
+    'driver': features,
+    'coefficient': logit.params[features].values,
+    'odds_ratio': logit.params[features].apply(math.exp).values,
+    'p_value': logit.pvalues[features].values
+})
+drivers['strength'] = drivers['coefficient'].abs()
+drivers = drivers.sort_values('strength', ascending=False).drop(columns='strength').reset_index(drop=True)
 
-print(f"\n--- At-Risk High-Value Shopper Audit ---")
-print(f"Total High-Value At-Risk Customers: {len(at_risk_loyal):,}")
-print(f"Total Cumulative Spend at Risk:     ₦{at_risk_loyal[spend_col].sum() / 1e6:,.2f} Million")
-print(f"Mean Basket Value per Visit:        ₦{(at_risk_loyal[spend_col] / at_risk_loyal[visits_col]).mean():,.2f}")
+print(f"Customers used: {len(model_data):,}. Pseudo R-squared: {logit.prsquared:.3f}")
+print((drivers.round(3)).to_string())
 
-# -------------------------------------------------------------------------
-# Figure Q4: Customer Segmentation & Churn Risk Matrix (Clean)
-# -------------------------------------------------------------------------
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+sns.barplot(data=segments.reset_index(), y='segment', x='churn_rate_pct', color='steelblue', ax=axes[0])
+axes[0].axvline(customers['churned_next_90d'].mean() * 100, color='red', linestyle='--', label='Overall average')
+axes[0].set(title='Churn rate by segment', xlabel='Churned within 90 days (%)', ylabel='Segment')
+axes[0].legend()
 
-# Filter out margin totals if present
-segment_plot_data = segment_summary[segment_summary['Customer_Segment'] != 'Total']
+sns.barplot(data=drivers, y='driver', x='coefficient', color='steelblue', ax=axes[1])
+axes[1].axvline(0, color='black')
+axes[1].set(title='Drivers of churn (standardised)', xlabel='Effect on log-odds of churn (per 1 std. dev.)', ylabel='Driver')
 
-# Panel 1: Spend Share by Segment (single colour + tick_params avoids warnings)
-sns.barplot(
-    data=segment_plot_data,
-    x='Customer_Segment',
-    y='revenue_share_pct',
-    color='#2b5c8f',
-    ax=axes[0]
-)
-axes[0].set_title('Revenue Share (%) by Behavioral Cohort', fontsize=11, fontweight='bold')
-axes[0].set_xlabel('Behavioral Segment')
-axes[0].set_ylabel('Total Chain Revenue Share (%)')
-axes[0].tick_params(axis='x', rotation=20)
-axes[0].grid(True, linestyle='--', alpha=0.5)
-
-# Panel 2: Recency vs Spend with Churn Risk Boundary
-sns.scatterplot(
-    data=customers,
-    x=r_feature,
-    y=customers[spend_col] / 1e3,
-    hue='Customer_Segment',
-    palette='Set1',
-    alpha=0.7,
-    s=45,
-    ax=axes[1]
-)
-axes[1].set_title('Customer Inactivity vs. Lifetime Spend', fontsize=11, fontweight='bold')
-axes[1].set_xlabel('Days Since Last Recorded Visit (Recency)')
-axes[1].set_ylabel('Lifetime Spend (Thousand NGN)')
-axes[1].grid(True, linestyle='--', alpha=0.5)
-
-# Place legend cleanly outside without overlap
-sns.move_legend(
-    axes[1],
-    loc="upper left",
-    bbox_to_anchor=(1.02, 1),
-    frameon=True,
-    title='Behavioral Segment'
-)
-
-plt.suptitle('Figure Q4: Customer Retention Landscape & At-Risk Capital', fontsize=13, fontweight='bold', y=1.02)
+plt.suptitle('Question 5: Customer Churn Risk')
 plt.tight_layout()
-
-# Save at 300 DPI with tight bounding box
-plt.savefig('figures/fig_q4_customer_churn_rfm.png', dpi=300, bbox_inches='tight')
-print("Saved clean Figure Q4 to figures/fig_q4_customer_churn_rfm.png")
-
-# -------------------------------------------------------------------------
-# Question 5: Macro Shocks, Fuel Inflation & Pass-Through Elasticity
-# -------------------------------------------------------------------------
-
-# -------------------------------------------------------------------------
-# Step 1: Macro Aggregation & Cost Ratios
-# -------------------------------------------------------------------------
-
-
-# 1. Aggregate to weekly chain-level series
-macro_weekly = df.groupby('week_start').agg(
-    cpi=('cpi_index', 'mean'),
-    fuel_price=('fuel_price_ngn_per_l', 'mean'),
-    mean_shelf_price=('unit_price_ngn', 'mean'),
-    mean_unit_cost=('unit_cost_ngn', 'mean'),
-    total_chain_units=('units_sold', 'sum'),
-    total_chain_revenue=('revenue_ngn', 'sum'),
-    total_chain_profit=('gross_profit', 'sum')
-).reset_index()
-
-# 2. Derive margin and cost-to-price ratios
-macro_weekly['chain_margin_pct'] = (macro_weekly['total_chain_profit'] / macro_weekly['total_chain_revenue']) * 100
-macro_weekly['cost_to_price_ratio'] = (macro_weekly['mean_unit_cost'] / macro_weekly['mean_shelf_price']) * 100
-
-print(f"Aggregated {len(macro_weekly)} trading weeks of macroeconomic indicators.")
-
-# -------------------------------------------------------------------------
-# Step 2: Shelf Price Pass-Through Elasticity
-# -------------------------------------------------------------------------
-
-# 1. Calculate log values using Python's standard math library
-macro_weekly['log_shelf_price'] = macro_weekly['mean_shelf_price'].apply(math.log)
-macro_weekly['log_fuel'] = macro_weekly['fuel_price'].apply(math.log)
-macro_weekly['log_cpi'] = macro_weekly['cpi'].apply(math.log)
-
-# 2. Fit OLS pass-through model
-pass_through_model = smf.ols('log_shelf_price ~ log_fuel + log_cpi', data=macro_weekly).fit()
-
-print("=== Macro Pass-Through Elasticity to Retail Shelf Prices ===")
-print(pass_through_model.summary().tables[1])
-
-# -------------------------------------------------------------------------
-# Step 3: Category-Level Fuel & CPI Elasticities
-# -------------------------------------------------------------------------
-
-cat_macro_results = []
-
-for cat in df['category'].unique():
-    cat_sub = df[df['category'] == cat].copy()
-    cat_sub['log_fuel_local'] = cat_sub['fuel_price_ngn_per_l'].apply(math.log)
-    cat_sub['log_cpi_local'] = cat_sub['cpi_index'].apply(math.log)
-    
-    cat_model = smf.ols(
-        'log_units ~ log_price_ratio + promo_flag + log_fuel_local + log_cpi_local',
-        data=cat_sub
-    ).fit()
-    
-    cat_macro_results.append({
-        'Category': cat,
-        'Fuel Price Elasticity': round(cat_model.params['log_fuel_local'], 4),
-        'Fuel p-value': round(cat_model.pvalues['log_fuel_local'], 4),
-        'CPI Elasticity': round(cat_model.params['log_cpi_local'], 4),
-        'CPI p-value': round(cat_model.pvalues['log_cpi_local'], 4)
-    })
-
-cat_macro_table = pd.DataFrame(cat_macro_results).sort_values('Fuel Price Elasticity').reset_index(drop=True)
-
-print("=== Category Macro Elasticities ===")
-print(cat_macro_table.to_string(index=False))
-
-# -------------------------------------------------------------------------
-# Step 4: Macro Stress Simulation
-# -------------------------------------------------------------------------
-
-fuel_shock_pct = 0.25   # +25% fuel increase
-cpi_shock_pct = 0.15    # +15% headline inflation
-
-log_fuel_delta = math.log(1.0 + fuel_shock_pct)
-log_cpi_delta = math.log(1.0 + cpi_shock_pct)
-
-# Project percentage volume change
-cat_macro_table['Projected Volume Impact (%)'] = cat_macro_table.apply(
-    lambda r: (math.exp(r['Fuel Price Elasticity'] * log_fuel_delta + r['CPI Elasticity'] * log_cpi_delta) - 1.0) * 100,
-    axis=1
-).round(2)
-
-# Classify risk level
-cat_macro_table['Shock Vulnerability'] = cat_macro_table['Projected Volume Impact (%)'].apply(
-    lambda x: 'High Contraction' if x < -8.0 else ('Moderate Drag' if x < -4.0 else 'Defensive / Resilient')
-)
-
-print("=== Stress-Test Projections (+25% Fuel, +15% CPI) ===")
-print(cat_macro_table[['Category', 'Fuel Price Elasticity', 'CPI Elasticity', 'Projected Volume Impact (%)', 'Shock Vulnerability']].to_string(index=False))
-
-# -------------------------------------------------------------------------
-# Step 5: Figure Q5 Visualization
-# -------------------------------------------------------------------------
-
-fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-
-# Left Panel: Cost-to-Price Ratio vs. Fuel Price
-sns.regplot(
-    data=macro_weekly,
-    x='fuel_price',
-    y='cost_to_price_ratio',
-    scatter_kws={'alpha': 0.6, 'color': '#2b5c8f', 's': 35},
-    line_kws={'color': '#d9534f', 'linewidth': 2},
-    ax=axes[0]
-)
-axes[0].set_title('Fuel Pump Price vs. Unit Cost-to-Shelf-Price Ratio', fontsize=11, fontweight='bold')
-axes[0].set_xlabel('Fuel Price (NGN per Litre)')
-axes[0].set_ylabel('Cost-to-Price Ratio (%) [Cost / Shelf Price]')
-axes[0].grid(True, linestyle='--', alpha=0.5)
-
-# Right Panel: Projected Volume Contraction
-plot_macro = cat_macro_table.sort_values('Projected Volume Impact (%)', ascending=True)
-
-sns.barplot(
-    data=plot_macro,
-    x='Category',
-    y='Projected Volume Impact (%)',
-    color='#34495e',
-    ax=axes[1]
-)
-axes[1].axhline(0, color='black', linewidth=0.8, linestyle='--')
-axes[1].set_title('Projected Unit Sales Contraction (+25% Fuel, +15% CPI)', fontsize=11, fontweight='bold')
-axes[1].set_xlabel('Product Category')
-axes[1].set_ylabel('Simulated Demand Volume Change (%)')
-axes[1].tick_params(axis='x', rotation=20)
-axes[1].grid(True, linestyle='--', alpha=0.5)
-
-plt.suptitle('Figure Q5: Macroeconomic Inflation & Fuel Shock Exposure', fontsize=13, fontweight='bold', y=1.02)
-plt.tight_layout()
-
-# Save at 300 DPI
-plt.savefig('figures/fig_q5_macro_fuel_shocks.png', dpi=300, bbox_inches='tight')
-print("Figure Q5 exported cleanly to figures/fig_q5_macro_fuel_shocks.png")
-
-
-# =============================================================================
-# VERIFICATION AUDIT: ARTIFACT GENERATION
-# =============================================================================
-print("\n" + "=" * 70)
-print("FINAL PIPELINE AUDIT")
-print("=" * 70)
-
-expected_figures = [
-    'fig1_units_distribution.png',
-    'fig2_store_correlation_heatmap.png',
-    'fig3_weekly_revenue_trend.png',
-    'fig4_units_by_category.png',
-    'fig5_promo_lift_by_category.png',
-    'fig6_sales_per_sqm_store_type.png',
-    'fig7_log_log_demand_curve.png',
-    'fig8_customer_spend_vs_visits.png',
-    'fig_q2_competition_cannibalisation.png',
-    'fig_q3_perishability_spoilage.png',
-    'fig_q4_customer_churn_rfm.png',
-    'fig_q5_macro_fuel_shocks.png'
-]
-
-missing_figs = [f for f in expected_figures if not os.path.exists(os.path.join('figures', f))]
-
-if not missing_figs and os.path.exists('cleaned_master.csv'):
-    print("SUCCESS: Pipeline executed end-to-end with zero errors!")
-    print(f" - Cleaned master table: cleaned_master.csv ({master_df.shape[0]:,} rows)")
-    print(f" - All {len(expected_figures)} high-resolution (300 DPI) figures verified in figures/")
-else:
-    print(f"WARNING: Pipeline finished with missing artifacts: {missing_figs}")
-
-print("=" * 70 + "\n")
+plt.savefig('figures/fig_q5_churn_drivers.png', dpi=300)
